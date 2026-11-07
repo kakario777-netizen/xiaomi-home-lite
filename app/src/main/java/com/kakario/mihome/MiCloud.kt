@@ -5,8 +5,15 @@ import android.content.SharedPreferences
 import android.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
+import java.net.InetAddress
+import java.net.UnknownHostException
+import java.util.concurrent.TimeUnit
+import okhttp3.Dns
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import java.net.URLEncoder
 import java.nio.ByteBuffer
 import java.security.MessageDigest
@@ -46,55 +53,69 @@ object MiCloud {
 
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
 
+    // 폰의 DNS(개인 DNS·광고 차단 등)가 샤오미 주소를 못 찾으면 DNS-over-HTTPS로 직접 찾음
+    private val dohClient = OkHttpClient.Builder().connectTimeout(8, TimeUnit.SECONDS).readTimeout(8, TimeUnit.SECONDS).build()
+    private val dnsCache = mutableMapOf<String, List<InetAddress>>()
+
+    private fun doh(host: String): List<InetAddress> {
+        dnsCache[host]?.let { return it }
+        val servers = listOf("https://1.1.1.1/dns-query?name=$host&type=A", "https://8.8.8.8/resolve?name=$host&type=A")
+        for (u in servers) {
+            try {
+                val req = Request.Builder().url(u).header("accept", "application/dns-json").build()
+                dohClient.newCall(req).execute().use { r ->
+                    val ans = JSONObject(r.body?.string() ?: "").optJSONArray("Answer") ?: return@use
+                    val ips = (0 until ans.length()).map { ans.getJSONObject(it) }
+                        .filter { it.optInt("type") == 1 }.map { InetAddress.getByName(it.getString("data")) }
+                    if (ips.isNotEmpty()) { dnsCache[host] = ips; return ips }
+                }
+            } catch (e: Exception) { }
+        }
+        throw UnknownHostException("$host 주소를 찾지 못했어요")
+    }
+
+    private val client = OkHttpClient.Builder()
+        .followRedirects(false).followSslRedirects(false)
+        .connectTimeout(10, TimeUnit.SECONDS).readTimeout(15, TimeUnit.SECONDS)
+        .dns(object : Dns {
+            override fun lookup(hostname: String): List<InetAddress> =
+                try { Dns.SYSTEM.lookup(hostname) } catch (e: UnknownHostException) { doh(hostname) }
+        })
+        .build()
+
+    private fun call(
+        url: String, ua: String, method: String = "GET", form: Map<String, String>? = null,
+        cookies: Map<String, String> = emptyMap(), headers: Map<String, String> = emptyMap()
+    ): Response {
+        val b = Request.Builder().url(url).header("User-Agent", ua)
+        if (cookies.isNotEmpty()) b.header("Cookie", cookies.entries.joinToString("; ") { "${it.key}=${it.value}" })
+        headers.forEach { b.header(it.key, it.value) }
+        if (form != null) {
+            val body = form.entries.joinToString("&") { enc(it.key) + "=" + enc(it.value) }
+            b.method(method, body.toRequestBody("application/x-www-form-urlencoded".toMediaType()))
+        }
+        return client.newCall(b.build()).execute()
+    }
+
+    private fun cookiesOf(r: Response): Map<String, String> {
+        val ck = mutableMapOf<String, String>()
+        r.headers("Set-Cookie").forEach {
+            val pair = it.substringBefore(";")
+            val i = pair.indexOf('=')
+            if (i > 0) ck[pair.substring(0, i).trim()] = pair.substring(i + 1).trim()
+        }
+        return ck
+    }
+
     private fun http(
         url: String, ua: String, method: String = "GET", form: Map<String, String>? = null,
         cookies: Map<String, String> = emptyMap(), headers: Map<String, String> = emptyMap()
-    ): Resp {
-        val conn = URL(url).openConnection() as HttpURLConnection
-        conn.instanceFollowRedirects = false
-        conn.connectTimeout = 10000
-        conn.readTimeout = 15000
-        conn.requestMethod = method
-        conn.setRequestProperty("User-Agent", ua)
-        if (cookies.isNotEmpty()) conn.setRequestProperty("Cookie", cookies.entries.joinToString("; ") { "${it.key}=${it.value}" })
-        headers.forEach { conn.setRequestProperty(it.key, it.value) }
-        if (form != null) {
-            conn.doOutput = true
-            conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
-            val body = form.entries.joinToString("&") { enc(it.key) + "=" + enc(it.value) }
-            conn.outputStream.use { it.write(body.toByteArray()) }
-        }
-        val code = conn.responseCode
-        val stream = if (code >= 400) conn.errorStream else conn.inputStream
-        val body = stream?.bufferedReader()?.use { it.readText() } ?: ""
-        val ck = mutableMapOf<String, String>()
-        conn.headerFields.forEach { (k, v) ->
-            if (k != null && k.equals("Set-Cookie", true)) v.forEach {
-                val pair = it.substringBefore(";")
-                val i = pair.indexOf('=')
-                if (i > 0) ck[pair.substring(0, i).trim()] = pair.substring(i + 1).trim()
-            }
-        }
-        val loc = conn.getHeaderField("Location")
-        conn.disconnect()
-        return Resp(code, body, ck, loc)
+    ): Resp = call(url, ua, method, form, cookies, headers).use { r ->
+        Resp(r.code, r.body?.string() ?: "", cookiesOf(r), r.header("Location"))
     }
 
-    private fun image(url: String, ua: String, cookies: Map<String, String>): Pair<ByteArray, String?> {
-        val conn = URL(url).openConnection() as HttpURLConnection
-        conn.setRequestProperty("User-Agent", ua)
-        conn.setRequestProperty("Cookie", cookies.entries.joinToString("; ") { "${it.key}=${it.value}" })
-        val bytes = conn.inputStream.use { it.readBytes() }
-        var ick: String? = null
-        conn.headerFields.forEach { (k, v) ->
-            if (k != null && k.equals("Set-Cookie", true)) v.forEach {
-                val pair = it.substringBefore(";")
-                if (pair.startsWith("ick=")) ick = pair.substring(4)
-            }
-        }
-        conn.disconnect()
-        return Pair(bytes, ick)
-    }
+    private fun image(url: String, ua: String, cookies: Map<String, String>): Pair<ByteArray, String?> =
+        call(url, ua, cookies = cookies).use { r -> Pair(r.body?.bytes() ?: ByteArray(0), cookiesOf(r)["ick"]) }
 
     private fun md5(s: String) = MessageDigest.getInstance("MD5").digest(s.toByteArray())
         .joinToString("") { "%02X".format(it) }

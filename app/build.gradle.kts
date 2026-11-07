@@ -34,3 +34,7 @@ android {
     kotlinOptions { jvmTarget = "17" }
     lint { checkReleaseBuilds = false; abortOnError = false }
 }
+
+dependencies {
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+}
