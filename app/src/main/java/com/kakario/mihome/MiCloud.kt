@@ -12,7 +12,7 @@ import java.nio.ByteBuffer
 import java.security.MessageDigest
 import java.security.SecureRandom
 
-class LoginResult(val ok: Boolean, val message: String, val verifyUrl: String? = null)
+class LoginResult(val ok: Boolean, val message: String, val verifyUrl: String? = null, val captcha: ByteArray? = null)
 class AuthException : Exception("로그인이 만료됐어요. 다시 로그인해 주세요")
 class Device(val did: String, val name: String, val model: String, val online: Boolean)
 
@@ -80,27 +80,53 @@ object MiCloud {
         return Resp(code, body, ck, loc)
     }
 
+    private fun image(url: String, ua: String, cookies: Map<String, String>): Pair<ByteArray, String?> {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        conn.setRequestProperty("User-Agent", ua)
+        conn.setRequestProperty("Cookie", cookies.entries.joinToString("; ") { "${it.key}=${it.value}" })
+        val bytes = conn.inputStream.use { it.readBytes() }
+        var ick: String? = null
+        conn.headerFields.forEach { (k, v) ->
+            if (k != null && k.equals("Set-Cookie", true)) v.forEach {
+                val pair = it.substringBefore(";")
+                if (pair.startsWith("ick=")) ick = pair.substring(4)
+            }
+        }
+        conn.disconnect()
+        return Pair(bytes, ick)
+    }
+
     private fun md5(s: String) = MessageDigest.getInstance("MD5").digest(s.toByteArray())
         .joinToString("") { "%02X".format(it) }
 
     private fun json(body: String) = JSONObject(body.replace("&&&START&&&", ""))
 
-    fun login(c: Context, user: String, pass: String): LoginResult {
+    fun login(c: Context, user: String, pass: String, captCode: String? = null): LoginResult {
         val ua = ua(c)
-        val base = mapOf("userId" to user, "sdkVersion" to "accountsdk-18.8.15", "deviceId" to deviceId(c))
+        val base = mutableMapOf("userId" to user, "sdkVersion" to "accountsdk-18.8.15", "deviceId" to deviceId(c))
+        val ick = prefs(c).getString("ick", null)
+        if (captCode != null && ick != null) base["ick"] = ick
         val r1 = http("https://account.xiaomi.com/pass/serviceLogin?sid=xiaomiio&_json=true", ua, cookies = base)
         val sign = json(r1.body).optString("_sign")
         val form = linkedMapOf(
             "sid" to "xiaomiio", "hash" to md5(pass), "callback" to "https://sts.api.io.mi.com/sts",
             "qs" to "%3Fsid%3Dxiaomiio%26_json%3Dtrue", "user" to user, "_sign" to sign, "_json" to "true"
         )
+        if (captCode != null) form["captCode"] = captCode
         val r2 = http("https://account.xiaomi.com/pass/serviceLoginAuth2", ua, "POST", form, base)
         val j2 = json(r2.body)
         val ssecurity = j2.optString("ssecurity")
         if (ssecurity.length < 4) {
             val n = j2.optString("notificationUrl")
             if (n.isNotEmpty()) return LoginResult(false, "본인 인증이 필요해요", if (n.startsWith("http")) n else "https://account.xiaomi.com$n")
-            if (j2.optString("captchaUrl").isNotEmpty()) return LoginResult(false, "샤오미가 보안 문자를 요구해요. 잠시 뒤 다시 시도해 주세요")
+            val cap = j2.optString("captchaUrl")
+            if (cap.isNotEmpty() && cap != "null") {
+                val url = if (cap.startsWith("http")) cap else "https://account.xiaomi.com$cap"
+                val (img, newIck) = image(url, ua, base)
+                prefs(c).edit().putString("ick", newIck ?: ick).apply()
+                val m = if (captCode != null) "보안 문자가 틀렸어요. 다시 입력해 주세요" else "그림 속 글자를 입력해 주세요"
+                return LoginResult(false, m, captcha = img)
+            }
             return LoginResult(false, "로그인 실패: 아이디·비밀번호를 확인해 주세요")
         }
         val userId = j2.optString("userId")

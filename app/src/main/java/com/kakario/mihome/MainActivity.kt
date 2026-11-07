@@ -2,6 +2,7 @@ package com.kakario.mihome
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -14,6 +15,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
@@ -77,16 +79,30 @@ class MainActivity : Activity() {
             background = round(card, 12); setPadding(dp(14), dp(12), dp(14), dp(12))
         }
         val status = text(msg ?: "", 13f, sub)
+        val capImg = ImageView(this).apply { visibility = View.GONE; setBackgroundColor(Color.WHITE); adjustViewBounds = true }
+        val capIn = EditText(this).apply {
+            hint = "보안 문자 입력"; setTextColor(Color.WHITE); setHintTextColor(sub); visibility = View.GONE
+            background = round(card, 12); setPadding(dp(14), dp(12), dp(14), dp(12))
+        }
         root.addView(id, wrapLp(24)); root.addView(pw, wrapLp(10))
+        root.addView(capImg, LinearLayout.LayoutParams(dp(200), dp(70)).apply { topMargin = dp(10) })
+        root.addView(capIn, wrapLp(8))
         lateinit var go: () -> Unit
         go = {
             status.text = "로그인 중…"
             val u = id.text.toString().trim(); val p = pw.text.toString()
+            val code = if (capIn.visibility == View.VISIBLE) capIn.text.toString().trim().ifEmpty { null } else null
             work {
-                val r = try { MiCloud.login(this, u, p) } catch (e: Exception) { LoginResult(false, "연결 실패: ${e.message}") }
+                val r = try { MiCloud.login(this, u, p, code) } catch (e: Exception) { LoginResult(false, "연결 실패: ${e.message}") }
                 runOnUiThread {
                     when {
                         r.ok -> showDevices()
+                        r.captcha != null -> {
+                            status.text = r.message
+                            capImg.setImageBitmap(BitmapFactory.decodeByteArray(r.captcha, 0, r.captcha.size))
+                            capImg.visibility = View.VISIBLE
+                            capIn.setText(""); capIn.visibility = View.VISIBLE; capIn.requestFocus()
+                        }
                         r.verifyUrl != null -> { status.text = r.message; verify(r.verifyUrl) { go() } }
                         else -> status.text = r.message
                     }
