@@ -3,6 +3,8 @@ package com.kakario.mihome
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Base64
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.InetAddress
@@ -27,7 +29,32 @@ class Device(val did: String, val name: String, val model: String, val online: B
 object MiCloud {
     private const val API = "https://api.io.mi.com/app"
 
-    fun prefs(c: Context): SharedPreferences = c.getSharedPreferences("mi", Context.MODE_PRIVATE)
+    // 로그인 토큰 등은 안드로이드 Keystore 기반 암호화 저장소에 보관
+    @Volatile private var secure: SharedPreferences? = null
+
+    fun prefs(c: Context): SharedPreferences {
+        secure?.let { return it }
+        synchronized(this) {
+            secure?.let { return it }
+            val app = c.applicationContext
+            val key = MasterKey.Builder(app).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build()
+            val enc = EncryptedSharedPreferences.create(
+                app, "mi_secure", key,
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+            )
+            // 이전 버전의 평문 저장값을 암호화 저장소로 옮기고 지움
+            val old = app.getSharedPreferences("mi", Context.MODE_PRIVATE)
+            if (old.all.isNotEmpty()) {
+                val e = enc.edit()
+                old.all.forEach { (k, v) -> if (v is String) e.putString(k, v) }
+                e.apply()
+                old.edit().clear().apply()
+            }
+            secure = enc
+            return enc
+        }
+    }
     fun loggedIn(c: Context) = prefs(c).getString("serviceToken", null) != null
     fun logout(c: Context) = prefs(c).edit().remove("serviceToken").remove("ssecurity").remove("userId").apply()
 
