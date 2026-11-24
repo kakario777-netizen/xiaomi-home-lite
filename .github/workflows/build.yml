@@ -1,8 +1,8 @@
 name: build
-# 릴리스 태그(v*)를 올릴 때만 빌드. 풀 리퀘스트로는 실행되지 않음
+# release 브랜치에 올릴 때만 빌드(버전은 VERSION 파일). 풀 리퀘스트로는 실행되지 않음
 on:
   push:
-    tags: ["v*"]
+    branches: [release]
   workflow_dispatch: {}
 permissions:
   contents: write
@@ -12,6 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: 버전 읽기
+        run: echo "TAG=v$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_ENV"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -29,12 +31,12 @@ jobs:
         env:
           KEYSTORE_FILE: ${{ runner.temp }}/release.jks
           KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ env.TAG }}
         run: gradle assembleRelease --no-daemon
       - run: rm -f "$RUNNER_TEMP/release.jks"
-      - run: cp app/build/outputs/apk/release/app-release.apk XiaomiHomeLite-${{ github.ref_name }}.apk
+      - run: cp app/build/outputs/apk/release/app-release.apk XiaomiHomeLite-${{ env.TAG }}.apk
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: 샤오미 홈 라이트 ${{ github.ref_name }}
+          tag_name: ${{ env.TAG }}
+          name: 샤오미 홈 라이트 ${{ env.TAG }}
           files: "*.apk"
